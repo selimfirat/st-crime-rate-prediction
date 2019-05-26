@@ -14,6 +14,7 @@ import utils
 import torch
 from torch import nn, optim
 from evaluator import score_r2
+import multiprocessing as mp
 
 class Pipeline:
     
@@ -23,7 +24,7 @@ class Pipeline:
     def init_pipeline(self):
         df = self.load_data()
         utils.init_seeds()
-        utils.init_cuda(6)
+        utils.init_cuda()
         
         
         print("Unique locations", np.unique(df[["lat", "long"]], axis=0).shape)
@@ -210,7 +211,7 @@ class Pipeline:
 
         return splits
     
-    def model_per_region(self, splits, model_cls, model_params, num_epochs=5, early_stop_epochs=100, lr=0.001):
+    def model_per_region(self, splits, model_cls, model_params, cudas, num_epochs=5, early_stop_epochs=100, lr=0.001):
         
         
         writer = utils.get_logger(model_cls.__name__)
@@ -228,9 +229,9 @@ class Pipeline:
             all_y_test_pred = np.zeros((y_test_shape[0], len(region_idxs), y_test_shape[1]))
             all_y_test = np.zeros((y_test_shape[0], len(region_idxs), y_test_shape[1]))
 
-            for region_idx in tqdm(region_idxs):
+            for i, region_idx in tqdm(enumerate(region_idxs)):
                 model = model_cls(**model_params)
-                model = model.float().cuda()
+                model = model.float().to()
                 criterion = nn.MSELoss(reduction="mean")
                 optimizer = optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0, amsgrad=False)
 
