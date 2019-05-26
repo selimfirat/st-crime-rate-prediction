@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 import verde as vd
+from tqdm import tqdm
 
 class Pipeline:
     
@@ -86,3 +87,66 @@ class Pipeline:
 
 
         return neigh_gdf
+
+    
+    def get_y(self):
+        
+        gdf = self.load_data()
+        
+        gdf = gdf.sort_index()
+        gdf.ts = pd.to_datetime(gdf.ts, errors='coerce', unit="s")
+        gdf["ts_index"] = gdf["ts"]
+        gdf = gdf.set_index("ts_index").sort_index()
+        bins_dt = pd.date_range(start="2015-01-01", end="2017-01-01", normalize=True, freq="D")
+        bins_str = bins_dt.astype(str).values
+        labels = ['({}, {})'.format(bins_str[i-1], bins_str[i]) for i in range(1, len(bins_str))]
+        gdf['timebin'] = pd.cut(gdf.ts.astype(np.int64)//10**9,
+                           bins=bins_dt.astype(np.int64)//10**9,
+                           labels=labels,
+                           right=False
+                           )
+        assert not np.any(gdf["timebin"].isna().values) # should be empty
+
+        list_neighborhoods = gdf.neigh.unique().tolist()
+        list_types = gdf.type.unique().tolist()
+        list_timebins = gdf.timebin.unique().tolist()
+
+        neigh2idx = {}
+        idx2neigh = {}
+        type2idx = {}
+        idx2type = {}
+        timebin2idx = {}
+        idx2timebin = {}
+
+        for idx, neigh in enumerate(list_neighborhoods):
+            neigh2idx[neigh] = idx
+            idx2neigh[idx] = neigh
+
+        for idx, typ in enumerate(list_types):
+            type2idx[typ] = idx
+            idx2type[idx] = typ
+
+        for idx, timebin in enumerate(list_timebins):
+            timebin2idx[timebin] = idx
+            idx2timebin[idx] = timebin
+
+        num_neighs = len(list_neighborhoods)
+        num_types = len(list_types)
+        num_timebins = len(list_timebins)
+
+        y = np.zeros((num_timebins, num_neighs, num_types), dtype=np.float64)
+
+        groups = gdf.groupby(by=["timebin", "neigh", "type"]).size()
+        keys = groups.keys()
+        values = groups.values
+        num_values = len(values)
+
+        for i in tqdm(range(num_values)):
+            timebin, neigh, typ = keys[i]
+            cnt = values[i]
+            idx_timebin = timebin2idx[timebin]
+            idx_neigh = neigh2idx[neigh]
+            idx_type = type2idx[typ]
+            y[idx_timebin, idx_neigh, idx_type] = cnt
+        
+        return y
