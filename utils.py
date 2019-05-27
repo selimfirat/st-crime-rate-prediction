@@ -8,11 +8,11 @@ def init_seeds():
 
     
 def init_cuda():
+    torch.cuda.set_device(6)
     torch.set_default_tensor_type("torch.cuda.FloatTensor")
     
     
 def get_cudas(ids=[5, 6, 7, 8]):
-    torch.cuda.set_device(6)
     
     torch.set_default_tensor_type("torch.cuda.FloatTensor")
     
