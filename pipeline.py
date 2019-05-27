@@ -174,7 +174,7 @@ class Pipeline:
             else:
                 X_data = []
                 y_data = []
-                for x_ts_start in tqdm(range(0, num_ts - predict_next - prev_inputs, convolve_by)):
+                for x_ts_start in range(0, num_ts - predict_next - prev_inputs, convolve_by):
                     x_ts_end = x_ts_start + prev_inputs
                     y_ts_start = x_ts_end
                     y_ts_end = y_ts_start + predict_next
@@ -184,7 +184,9 @@ class Pipeline:
                     y_data.append(my)
 
                 X_data = np.array(X_data)
+                X_data = X_data.reshape((X_data.shape[0], 1, X_data.shape[1]*X_data.shape[2]))
                 y_data = np.array(y_data)
+                y_data = y_data.reshape((y_data.shape[0], 1, y_data.shape[1]*y_data.shape[2]))
 
             splits[region_idx] = []
             reg_splits = TimeSeriesSplit(n_splits=n_splits)
@@ -275,12 +277,12 @@ class Pipeline:
             print("Split #" + str(split_idx))
             
             y_val_shape = splits[0][split_idx][3].shape
-            all_y_val_pred = np.zeros((y_val_shape[0], len(region_idxs), y_val_shape[1]))
-            all_y_val = np.zeros((y_val_shape[0], len(region_idxs), y_val_shape[1]))
+            all_y_val_pred = np.zeros((y_val_shape[0], len(region_idxs), 25))
+            all_y_val = np.zeros((y_val_shape[0], len(region_idxs), 25))
             
             y_test_shape = splits[0][split_idx][5].shape
-            all_y_test_pred = np.zeros((y_test_shape[0], len(region_idxs), y_test_shape[1]))
-            all_y_test = np.zeros((y_test_shape[0], len(region_idxs), y_test_shape[1]))
+            all_y_test_pred = np.zeros((y_test_shape[0], len(region_idxs), 25))
+            all_y_test = np.zeros((y_test_shape[0], len(region_idxs), 25))
 
             for region_idx in tqdm(region_idxs):
                 model = model_cls(**model_params)
@@ -299,7 +301,17 @@ class Pipeline:
                     # Forward
                     y_train_pred = model.forward(X_train)
 
-                    loss = criterion(y_train_pred.squeeze(0), y_train)
+                    if y_train_pred.shape[0] == 1:
+                        y_train_pred = y_train_pred.squeeze(0)
+                        
+                    if y_train_pred.shape[1] == 1:
+                        y_train_pred = y_train_pred.squeeze(1)
+                        
+                    if y_train.shape[1] == 1:
+                        y_train = y_train.squeeze(1)
+                    
+                    
+                    loss = criterion(y_train_pred, y_train)
 
                     optimizer.zero_grad()
                     model.zero_grad()
@@ -312,13 +324,16 @@ class Pipeline:
 
                     with torch.no_grad():
 
-                        y_train_pred = y_train_pred.cpu().detach().numpy().squeeze(0)
+                        y_train_pred = y_train_pred.cpu().detach().numpy()
 
                         score_train = score_r2(y_train.cpu(), y_train_pred)
 
                         y_val_pred = model.forward(X_val)
+                        
+                        if y_val_pred.shape[0] == 1:
+                            y_val_pred = y_val_pred.squeeze(0)
 
-                        y_val_pred = y_val_pred.cpu().detach().numpy().squeeze(0)
+                        y_val_pred = y_val_pred.cpu().detach().numpy()
                         score_val = score_r2(y_val.cpu(), y_val_pred)
 
                         writer.add_scalar("splits/split" + str(split_idx + 1) + "/region" + str(region_idx) + "/train_mse", loss.item(), num_epoch+1)
@@ -339,13 +354,25 @@ class Pipeline:
                     val_pred = model.forward(X_val)
                     test_pred = model.forward(X_test)
                     
+                    if val_pred.shape[0] == 1:
+                        val_pred = val_pred.squeeze(0)
+                        
+                    if test_pred.shape[0] == 1:
+                        test_pred = test_pred.squeeze(0)
+                    
+                    if y_val.shape[1] == 1:
+                        y_val = y_val.squeeze(1)
+                        
+                    if y_test.shape[1] == 1:
+                        y_test = y_test.squeeze(1)
+                    
                     # print(val_pred.shape, X_val.shape, y_val.shape, test_pred.shape, X_test.shape, y_test.shape)
 
                     all_y_val[:, region_idx, :] = y_val.cpu()
-                    all_y_val_pred[:, region_idx, :] = val_pred.cpu().detach().numpy().squeeze(0)
+                    all_y_val_pred[:, region_idx, :] = val_pred.cpu().detach().numpy()
                     
                     all_y_test[:, region_idx, :] = y_test.cpu()
-                    all_y_test_pred[:, region_idx, :] = test_pred.cpu().detach().numpy().squeeze(0)
+                    all_y_test_pred[:, region_idx, :] = test_pred.cpu().detach().numpy()
 
             score_val = score_r2(all_y_val, all_y_val_pred)
             score_test = score_r2(all_y_test, all_y_test_pred)
