@@ -368,11 +368,6 @@ class Pipeline:
     def model_regions_as_dp(self, name, splits, model_cls, model_params, num_epochs=5, early_stop_epochs=100, lr=0.001):
         
         writer = utils.get_logger(name)
-        model = model_cls(**model_params)
-        model = model.float().cuda()
-        criterion = nn.MSELoss(reduction="mean")
-        optimizer = optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0, amsgrad=False)
-
         split_idxs = range(len(splits))
         region_idxs = range(splits[0][0].shape[0])
 
@@ -380,6 +375,11 @@ class Pipeline:
         score_cv_test = 0.0
 
         for split_idx in split_idxs:
+            model = model_cls(**model_params)
+            model = model.float().cuda()
+            criterion = nn.MSELoss(reduction="mean")
+            optimizer = optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0, amsgrad=False)
+
             print("Split #" + str(split_idx))
             
             y_val_shape = splits[0][split_idx][3].shape
