@@ -396,7 +396,7 @@ class Pipeline:
 
             early_stop_cur = 0
             max_val_score = -np.inf
-            for num_epoch in range(num_epochs):
+            for num_epoch in tqdm(range(num_epochs)):
 
                 # Forward
                 y_train_pred = model.forward(X_train)
