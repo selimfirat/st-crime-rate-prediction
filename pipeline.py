@@ -5,8 +5,6 @@ import numpy as np
 import pyproj
 import numpy as np
 import matplotlib.pyplot as plt
-import cartopy.crs as ccrs
-import verde as vd
 from tqdm import tqdm
 from sklearn.model_selection import TimeSeriesSplit
 from torch import from_numpy
@@ -164,6 +162,7 @@ class Pipeline:
         num_ts = y.shape[0]
 
         predict_next = 1
+        convolve_by = 1
 
 
         splits = {}
@@ -210,21 +209,76 @@ class Pipeline:
 
         return splits
     
-    def model_per_region(self, splits, model_cls, model_params, num_epochs=5, early_stop_epochs=100, lr=0.001):
+    def get_splits_ar(self, prev_inputs=1, n_splits=3):
+        y = self.get_y()
         
+        num_regions = y.shape[1]
+        num_ts = y.shape[0]
+
+        predict_next = 1
+        convolve_by = 1
+
+
+        splits = []
         
-        writer = utils.get_logger(model_cls.__name__)
+        if prev_inputs == 1:
+            X_data = y[:-1, :, :]
+            y_data = y[1:, :, :]
+        else:
+            X_data = []
+            y_data = []
+            for x_ts_start in tqdm(range(0, num_ts - predict_next - prev_inputs, convolve_by)):
+                x_ts_end = x_ts_start + prev_inputs
+                y_ts_start = x_ts_end
+                y_ts_end = y_ts_start + predict_next
+                mx = y[x_ts_start:x_ts_end, :, :]
+                my = y[y_ts_start:y_ts_end, :, :]
+                X_data.append(mx)
+                y_data.append(my)
+
+            X_data = np.array(X_data)
+            y_data = np.array(y_data)
+
+        reg_splits = TimeSeriesSplit(n_splits=n_splits)
+        for split_idx, (train, test) in enumerate(reg_splits.split(X_data, y_data)):
+            train_end = int(len(train)*0.9)
+            X_train = from_numpy(X_data[train[:train_end]].swapaxes(0, 1))
+            y_train = from_numpy(y_data[train[:train_end]].swapaxes(0, 1))
+            X_val = from_numpy(X_data[train[train_end:]].swapaxes(0, 1))
+            y_val = from_numpy(y_data[train[train_end:]].swapaxes(0, 1))
+            X_test = from_numpy(X_data[test].swapaxes(0, 1))
+            y_test = from_numpy(y_data[test].swapaxes(0, 1))
+
+            X_train = X_train.float()
+            y_train = y_train.float()
+            X_val = X_val.float()
+            y_val = y_val.float()
+            X_test = X_test.float()
+            y_test = y_test.float()
+            splits.append((X_train, y_train, X_val, y_val, X_test, y_test))
+
+        assert len(splits) == n_splits
+
+        return splits
+    
+    def model_per_region(self, name, splits, model_cls, model_params, num_epochs=5, early_stop_epochs=100, lr=0.001):
+        
+        writer = utils.get_logger(name)
 
         split_idxs = range(len(splits[0]))
         region_idxs = splits.keys()
 
-        score_cv = 0.0
-
-        y_test_shape = splits[0][0][5].shape
+        score_cv_val = 0.0
+        score_cv_test = 0.0
 
         for split_idx in split_idxs:
             print("Split #" + str(split_idx))
             
+            y_val_shape = splits[0][split_idx][3].shape
+            all_y_val_pred = np.zeros((y_val_shape[0], len(region_idxs), y_val_shape[1]))
+            all_y_val = np.zeros((y_val_shape[0], len(region_idxs), y_val_shape[1]))
+            
+            y_test_shape = splits[0][split_idx][5].shape
             all_y_test_pred = np.zeros((y_test_shape[0], len(region_idxs), y_test_shape[1]))
             all_y_test = np.zeros((y_test_shape[0], len(region_idxs), y_test_shape[1]))
 
@@ -267,9 +321,9 @@ class Pipeline:
                         y_val_pred = y_val_pred.cpu().detach().numpy().squeeze(0)
                         score_val = score_r2(y_val.cpu(), y_val_pred)
 
-                        writer.add_scalar("regions/region" + str(region_idx) + "/train_mse", loss.item(), num_epoch+1)
-                        writer.add_scalar("regions/region" + str(region_idx) + "/train_r2", score_train, num_epoch+1)
-                        writer.add_scalar("regions/region" + str(region_idx) + "/val_r2", score_val, num_epoch+1)
+                        writer.add_scalar("splits/split" + str(split_idx + 1) + "/region" + str(region_idx) + "/train_mse", loss.item(), num_epoch+1)
+                        writer.add_scalar("splits/split" + str(split_idx + 1) + "/region" + str(region_idx) + "/train_r2", score_train, num_epoch+1)
+                        writer.add_scalar("splits/split" + str(split_idx + 1) + "/region" + str(region_idx) + "/val_r2", score_val, num_epoch+1)
 
                         early_stop_cur += 1
 
@@ -281,22 +335,136 @@ class Pipeline:
                             break
 
                 with torch.no_grad():
-
+                                        
+                    val_pred = model.forward(X_val)
                     test_pred = model.forward(X_test)
+                    
+                    # print(val_pred.shape, X_val.shape, y_val.shape, test_pred.shape, X_test.shape, y_test.shape)
+
+                    all_y_val[:, region_idx, :] = y_val.cpu()
+                    all_y_val_pred[:, region_idx, :] = val_pred.cpu().detach().numpy().squeeze(0)
+                    
                     all_y_test[:, region_idx, :] = y_test.cpu()
                     all_y_test_pred[:, region_idx, :] = test_pred.cpu().detach().numpy().squeeze(0)
 
+            score_val = score_r2(all_y_val, all_y_val_pred)
             score_test = score_r2(all_y_test, all_y_test_pred)
 
-            writer.add_scalar("splits/split" + str(split_idx + 1) + "/test_r2", score_test)
+            writer.add_scalar("splits_res/split" + str(split_idx + 1) + "/val_r2", score_val)
+            writer.add_scalar("splits_res/split" + str(split_idx + 1) + "/test_r2", score_test)
             print("Test score for split " + str(split_idx  + 1) + " is " + str(score_test))
 
-            score_cv += score_test
+            score_cv_val += score_val
+            score_cv_test += score_test
 
-        score_cv = score_cv / len(split_idxs)
-        print("Mean of cross validation splits' test score is " + str(score_cv))
-        writer.add_scalar("cv/test_r2" , score_cv)
+        score_cv_val = score_cv_val / len(split_idxs)
+        score_cv_test = score_cv_test / len(split_idxs)
+        print("Mean of cross validation splits' val score is " + str(score_cv_val))
+        print("Mean of cross validation splits' test score is " + str(score_cv_test))
+        writer.add_scalar("cv/val_r2" , score_cv_val)
+        writer.add_scalar("cv/test_r2" , score_cv_test)
 
     
+    def model_regions_as_dp(self, name, splits, model_cls, model_params, num_epochs=5, early_stop_epochs=100, lr=0.001):
+        
+        writer = utils.get_logger(name)
+        model = model_cls(**model_params)
+        model = model.float().cuda()
+        criterion = nn.MSELoss(reduction="mean")
+        optimizer = optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0, amsgrad=False)
+
+        split_idxs = range(len(splits))
+        region_idxs = range(splits[0][0].shape[0])
+
+        score_cv_val = 0.0
+        score_cv_test = 0.0
+
+        for split_idx in split_idxs:
+            print("Split #" + str(split_idx))
+            
+            y_val_shape = splits[0][split_idx][3].shape
+            all_y_val_pred = np.zeros((y_val_shape[0], len(region_idxs), y_val_shape[1]))
+            all_y_val = np.zeros((y_val_shape[0], len(region_idxs), y_val_shape[1]))
+            
+            y_test_shape = splits[0][split_idx][5].shape
+            all_y_test_pred = np.zeros((y_test_shape[0], len(region_idxs), y_test_shape[1]))
+            all_y_test = np.zeros((y_test_shape[0], len(region_idxs), y_test_shape[1]))
+
+            X_train, y_train, X_val, y_val, X_test, y_test = splits[split_idx]
+
+            X_train, y_train, X_val, y_val, X_test, y_test = X_train.cuda(), y_train.cuda(), X_val.cuda(), y_val.cuda(), X_test.cuda(), y_test.cuda()
+
+            early_stop_cur = 0
+            max_val_score = -np.inf
+            for num_epoch in range(num_epochs):
+
+                # Forward
+                y_train_pred = model.forward(X_train)
+
+                loss = criterion(y_train_pred, y_train)
+
+                optimizer.zero_grad()
+                model.zero_grad()
+
+                # Backward
+                loss.backward()
+
+                # Update model parameters
+                optimizer.step()
+                
+                with torch.no_grad():
+
+                    y_train_pred = y_train_pred.cpu().detach().numpy()
+
+                    score_train = score_r2(y_train.cpu(), y_train_pred)
+
+                    y_val_pred = model.forward(X_val)
+
+                    y_val_pred = y_val_pred.cpu().detach().numpy()
+                    score_val = score_r2(y_val.cpu(), y_val_pred)
+
+                    writer.add_scalar("splits/split" + str(split_idx + 1) + "/train_mse", loss.item(), num_epoch+1)
+                    writer.add_scalar("splits/split" + str(split_idx + 1) + "/train_r2", score_train, num_epoch+1)
+                    writer.add_scalar("splits/split" + str(split_idx + 1) + "/val_r2", score_val, num_epoch+1)
+
+                    early_stop_cur += 1
+
+                    if score_val >= max_val_score:
+                        early_stop_cur = 0
+                        max_val_score = score_val
+                    elif early_stop_cur > early_stop_epochs:
+                        writer.add_text("Text", "Early stopping at Epoch " + str(num_epoch + 1), num_epoch+1)
+                        break
+
+            with torch.no_grad():
+                                        
+                val_pred = model.forward(X_val)
+                test_pred = model.forward(X_test)
+
+                # print(val_pred.shape, X_val.shape, y_val.shape, test_pred.shape, X_test.shape, y_test.shape)
+
+                y_val = y_val.cpu()
+                y_val_pred = val_pred.cpu().detach().numpy()
+                    
+                y_test = y_test.cpu()
+                y_test_pred = test_pred.cpu().detach().numpy()
+
+            score_val = score_r2(y_val, y_val_pred)
+            score_test = score_r2(y_test, y_test_pred)
+
+            writer.add_scalar("splits_res/split" + str(split_idx + 1) + "/val_r2", score_val)
+            writer.add_scalar("splits_res/split" + str(split_idx + 1) + "/test_r2", score_test)
+            print("Test score for split " + str(split_idx  + 1) + " is " + str(score_test))
+
+            score_cv_val += score_val
+            score_cv_test += score_test
+
+        score_cv_val = score_cv_val / len(split_idxs)
+        score_cv_test = score_cv_test / len(split_idxs)
+        print("Mean of cross validation splits' val score is " + str(score_cv_val))
+        print("Mean of cross validation splits' test score is " + str(score_cv_test))
+        writer.add_scalar("cv/val_r2" , score_cv_val)
+        writer.add_scalar("cv/test_r2" , score_cv_test)
+
     def close(self):
         utils.clear_caches()

@@ -2,11 +2,11 @@ import torch
 from torch import nn
 from torch import from_numpy
 
-class LSTMMultivariateRegressorPerRegion(nn.Module):
+class LSTMMultivariateRegressor(nn.Module):
     
     def __init__(self, input_dim, output_dim, prev_inputs=1, lstms = [16, 32, 16]):
 
-        super(LSTMMultivariateRegressorPerRegion, self).__init__()
+        super(LSTMMultivariateRegressor, self).__init__()
         
         hdim = lstms[0]
         self.lstms_hdim = lstms
@@ -21,14 +21,15 @@ class LSTMMultivariateRegressorPerRegion(nn.Module):
 
         self.linear = nn.Linear(hdim, output_dim)
         
-        self.h_t = [torch.zeros(prev_inputs, hdim, dtype=torch.float).cuda() for hdim in self.lstms_hdim]
-        self.c_t = [torch.zeros(prev_inputs, hdim, dtype=torch.float).cuda() for hdim in self.lstms_hdim]
-        
-        
+        self.h_t = [torch.zeros(98, hdim, dtype=torch.float).cuda() for hdim in self.lstms_hdim]
+        self.c_t = [torch.zeros(98, hdim, dtype=torch.float).cuda() for hdim in self.lstms_hdim]
+
     def forward(self, input):
         preds = []
         
-        for i, input_t in enumerate(input.chunk(input.size(0), dim=0)):
+        for i, input_t in enumerate(input.chunk(input.size(1), dim=1)):
+            
+            input_t = input_t.squeeze(1)
 
             self.h_t[0], self.c_t[0] = self.lstms[0](input_t, (self.h_t[0], self.c_t[0]))
         
