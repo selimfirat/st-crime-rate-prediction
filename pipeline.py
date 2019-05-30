@@ -12,6 +12,9 @@ import utils
 import torch
 from torch import nn, optim
 from evaluator import score_r2
+import geopandas as gpd
+from libpysal.weights.contiguity import Queen, Rook
+import libpysal
 
 class Pipeline:
     
@@ -391,7 +394,185 @@ class Pipeline:
         writer.add_scalar("cv/val_r2" , score_cv_val)
         writer.add_scalar("cv/test_r2" , score_cv_test)
 
-    
+    def get_neighbors_dict(self):
+        neighborhoods = gpd.read_file("data/chicago/neighborhoods/geo_export_265e79d9-e1f1-47fc-856d-1c753cbbe120.shp")
+        weights = Queen.from_dataframe(neighborhoods) # Try with Rook later
+        wnp = libpysal.weights.util.nonplanar_neighbors(weights, neighborhoods)
+        wdf = weights.to_adjlist(remove_symmetric=True)
+
+        list_edges = []
+        dict_idx_edges = {}
+        for rowid, row in wdf.iterrows():
+            tidx1 = int(row["focal"])
+            tidx2 = int(row["neighbor"])
+
+            idx1 = np.minimum(tidx1, tidx2)
+            idx2 = np.maximum(tidx1, tidx2)
+
+            list_edges.append((idx1, idx2))
+            dict_idx_edges[idx1] = dict_idx_edges.get(idx1, []) + [idx2]
+            dict_idx_edges[idx2] = dict_idx_edges.get(idx2, []) + [idx1]
+            
+        
+        return dict_idx_edges
+
+
+    def pr_ensemble(self, name, splits, model_cls, model_params, num_epochs=5, early_stop_epochs=100, lr=0.001):
+        
+        writer = utils.get_logger(name)
+
+        split_idxs = range(len(splits[0]))
+        region_idxs = splits.keys()
+
+        score_cv_val = 0.0
+        score_cv_test = 0.0
+        
+        dict_neighbors = self.get_neighbors_dict()
+
+        
+        for split_idx in split_idxs:
+            print("Split #" + str(split_idx))
+            
+            y_val_shape = splits[0][split_idx][3].shape
+            all_y_val_pred = np.zeros((y_val_shape[0], len(region_idxs), 25))
+            all_y_val = np.zeros((y_val_shape[0], len(region_idxs), 25))
+            
+            y_test_shape = splits[0][split_idx][5].shape
+            all_y_test_pred = np.zeros((y_test_shape[0], len(region_idxs), 25))
+            all_y_test = np.zeros((y_test_shape[0], len(region_idxs), 25))
+
+            models = {}
+            for region_idx in tqdm(region_idxs):
+                model = model_cls(**model_params)
+                model = model.float().cuda()
+                criterion = nn.MSELoss(reduction="mean")
+                optimizer = optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0, amsgrad=False)
+
+                X_train, y_train, X_val, y_val, X_test, y_test = splits[region_idx][split_idx]
+
+                X_train, y_train, X_val, y_val, X_test, y_test = X_train.cuda(), y_train.cuda(), X_val.cuda(), y_val.cuda(), X_test.cuda(), y_test.cuda()
+
+                early_stop_cur = 0
+                max_val_score = -np.inf
+                for num_epoch in range(num_epochs):
+
+                    # Forward
+                    y_train_pred = model.forward(X_train)
+
+                    if y_train_pred.shape[0] == 1:
+                        y_train_pred = y_train_pred.squeeze(0)
+                        
+                    if y_train_pred.shape[1] == 1:
+                        y_train_pred = y_train_pred.squeeze(1)
+                        
+                    if y_train.shape[1] == 1:
+                        y_train = y_train.squeeze(1)
+                    
+                    
+                    loss = criterion(y_train_pred, y_train)
+
+                    optimizer.zero_grad()
+                    model.zero_grad()
+
+                    # Backward
+                    loss.backward()
+
+                    # Update model parameters
+                    optimizer.step()
+
+                    with torch.no_grad():
+
+                        y_train_pred = y_train_pred.cpu().detach().numpy()
+
+                        score_train = score_r2(y_train.cpu(), y_train_pred)
+
+                        y_val_pred = model.forward(X_val)
+                        
+                        if y_val_pred.shape[0] == 1:
+                            y_val_pred = y_val_pred.squeeze(0)
+
+                        y_val_pred = y_val_pred.cpu().detach().numpy()
+                        score_val = score_r2(y_val.cpu(), y_val_pred)
+
+                        writer.add_scalar("splits/split" + str(split_idx + 1) + "/region" + str(region_idx) + "/train_mse", loss.item(), num_epoch+1)
+                        writer.add_scalar("splits/split" + str(split_idx + 1) + "/region" + str(region_idx) + "/train_r2", score_train, num_epoch+1)
+                        writer.add_scalar("splits/split" + str(split_idx + 1) + "/region" + str(region_idx) + "/val_r2", score_val, num_epoch+1)
+
+                        early_stop_cur += 1
+
+                        if score_val >= max_val_score:
+                            early_stop_cur = 0
+                            max_val_score = score_val
+                        elif early_stop_cur > early_stop_epochs:
+                            writer.add_text("Text", "Region " + str(region_idx) + " Early stopping at Epoch " + str(num_epoch + 1), num_epoch+1)
+                            break
+
+                models[region_idx] = model
+                
+                with torch.no_grad():
+                    
+                    if y_val.shape[1] == 1:
+                        y_val = y_val.squeeze(1)
+                        
+                    if y_test.shape[1] == 1:
+                        y_test = y_test.squeeze(1)
+                    
+                    # print(val_pred.shape, X_val.shape, y_val.shape, test_pred.shape, X_test.shape, y_test.shape)
+
+                    all_y_val[:, region_idx, :] = y_val.cpu()
+                    # all_y_val_pred[:, region_idx, :] = val_pred.cpu().detach().numpy()
+                    
+                    all_y_test[:, region_idx, :] = y_test.cpu()
+                    # all_y_test_pred[:, region_idx, :] = test_pred.cpu().detach().numpy()
+
+            with torch.no_grad():
+                for region_idx in tqdm(region_idxs):
+                    neighbors = dict_neighbors[region_idx] + [region_idx]
+                    res = np.zeros(all_y_test[:, region_idx, :].shape)
+                    val_res = np.zeros(all_y_val[:, region_idx, :].shape)
+                    
+                    for neighbor_region_idx in neighbors:
+                        model = models[neighbor_region_idx]
+                        
+                        test_pred = model.forward(X_test)
+                        
+                        if test_pred.shape[0] == 1:
+                            test_pred = test_pred.squeeze(0)
+
+                        res += test_pred.cpu().detach().numpy()
+                        
+                        val_pred = model.forward(X_val)
+                        
+                        if val_pred.shape[0] == 1:
+                            val_pred = val_pred.squeeze(0)
+
+                        val_res += val_pred.cpu().detach().numpy()
+                    
+                    res /= 1.0 * len(neighbors)
+                    val_res /= 1.0 * len(neighbors)
+                    
+                    all_y_test_pred[:, region_idx, :] = res
+                    
+                    all_y_val_pred[:, region_idx, :] = val_res
+                    
+            score_val = score_r2(all_y_val, all_y_val_pred)
+            score_test = score_r2(all_y_test, all_y_test_pred)
+
+            writer.add_scalar("splits_res/split" + str(split_idx + 1) + "/val_r2", score_val)
+            writer.add_scalar("splits_res/split" + str(split_idx + 1) + "/test_r2", score_test)
+            print("Test score for split " + str(split_idx  + 1) + " is " + str(score_test))
+
+            score_cv_val += score_val
+            score_cv_test += score_test
+
+        score_cv_val = score_cv_val / len(split_idxs)
+        score_cv_test = score_cv_test / len(split_idxs)
+        print("Mean of cross validation splits' val score is " + str(score_cv_val))
+        print("Mean of cross validation splits' test score is " + str(score_cv_test))
+        writer.add_scalar("cv/val_r2" , score_cv_val)
+        writer.add_scalar("cv/test_r2" , score_cv_test)
+
+
     def model_regions_as_dp(self, name, splits, model_cls, model_params, num_epochs=5, early_stop_epochs=100, lr=0.001):
         
         writer = utils.get_logger(name)

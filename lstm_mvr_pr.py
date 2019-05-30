@@ -30,10 +30,12 @@ class LSTMMultivariateRegressorPerRegion(nn.Module):
         preds = []
         
         for i, input_t in enumerate(input.chunk(input.size(0), dim=0)):
-
+            """
             if input_t.shape[0] == 1:
                 input_t = input_t.squeeze(0)
 
+            """
+            
             self.h_t[0], self.c_t[0] = self.lstms[0](input_t, (self.h_t[0], self.c_t[0]))
         
             for i in range(1, len(self.lstms)):

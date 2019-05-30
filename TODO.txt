@@ -2,6 +2,3 @@ Calculate MAE
 graph connectivity attention
 sum GCA with an extra parameter
 unfold for N=1 and N=7 prev days over GCN concatenated with crime vector.
-https://www.kaggle.com/yunusulucay/visualization-analysis-and-mapping-example
-https://www.kaggle.com/uds5501/chicago-crime-mapping
-https://www.kaggle.com/txp142130/utd-crimes-in-chicago-with-choropleth-map
